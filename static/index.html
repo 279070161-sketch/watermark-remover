@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>极简去水印</title>
+  <style>
+    :root {
+      --bg: #f5f5f7;
+      --surface: rgba(255, 255, 255, 0.88);
+      --border: rgba(0, 0, 0, 0.08);
+      --text: #1d1d1f;
+      --muted: #86868b;
+      --primary: #0071e3;
+      --primary-hover: #0077ed;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .topbar {
+      position: fixed;
+      top: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--surface);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--border);
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+      border-radius: 999px;
+      padding: 6px 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      z-index: 50;
+    }
+
+    .divider {
+      width: 1px;
+      height: 20px;
+      background: rgba(0, 0, 0, 0.1);
+      margin: 0 4px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: none;
+      background: transparent;
+      color: var(--text);
+      padding: 7px 14px;
+      border-radius: 999px;
+      font-size: 13.5px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .btn:hover:not(:disabled) {
+      background: rgba(0, 0, 0, 0.05);
+    }
+
+    .btn:disabled {
+      opacity: 0.32;
+      cursor: default;
+    }
+
+    .btn.active {
+      background: #1d1d1f;
+      color: #fff;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: #fff;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+
+    .brush-slider {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .brush-slider.visible {
+      display: inline-flex;
+    }
+
+    .brush-slider input[type="range"] {
+      width: 72px;
+      accent-color: #1d1d1f;
+      cursor: pointer;
+    }
+
+    .viewport {
+      flex: 1;
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .canvas-wrapper {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      flex-shrink: 0;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+      border-radius: 6px;
+      overflow: hidden;
+      transform-origin: center center;
+      background: #fff;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    #maskCanvas, #overlayCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      pointer-events: none;
+    }
+
+    #maskCanvas {
+      opacity: 0.5;
+    }
+
+    #interactionLayer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+
+    .empty-card {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: min(460px, 90vw);
+      background: #ffffff;
+      border: 1.5px dashed rgba(0, 0, 0, 0.14);
+      border-radius: 20px;
+      padding: 48px 32px;
+      text-align: center;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.04);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .empty-card:hover, .empty-card.dragover {
+      border-color: var(--primary);
+      transform: translate(-50%, -50%) scale(1.01);
+    }
+
+    .empty-card.hidden {
+      display: none;
+    }
+
+    .empty-title {
+      font-size: 18px;
+      font-weight: 600;
+      margin-top: 14px;
+      margin-bottom: 6px;
+    }
+
+    .empty-sub {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 22px;
+    }
+
+    .bottom-hint {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--surface);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      padding: 5px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--muted);
+      display: none;
+      align-items: center;
+      gap: 10px;
+      z-index: 40;
+    }
+
+    .bottom-hint.visible {
+      display: inline-flex;
+    }
+
+    .loading-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.65);
+      backdrop-filter: blur(4px);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      z-index: 30;
+    }
+
+    .loading-overlay.active {
+      display: flex;
+    }
+
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid rgba(0, 0, 0, 0.1);
+      border-top-color: #1d1d1f;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 56px;
+      left: 50%;
+      transform: translateX(-50%) translateY(8px);
+      background: rgba(29, 29, 31, 0.92);
+      color: #fff;
+      padding: 8px 18px;
+      border-radius: 999px;
+      font-size: 13px;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.2s ease;
+      z-index: 100;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+  </style>
+</head>
+<body>
+
+  <input type="file" id="fileInput" accept="image/*" style="display: none;" />
+
+  <div class="topbar">
+    <button class="btn" onclick="document.getElementById('fileInput').click()">📂 打开图片</button>
+
+    <div class="divider"></div>
+
+    <button class="btn active" id="toolRect" onclick="setTool('rect')">🔲 框选消除</button>
+    <button class="btn" id="toolBrush" onclick="setTool('brush')">🖌️ 涂抹消除</button>
+
+    <div class="brush-slider" id="brushSliderBox">
+      <span>粗细</span>
+      <input type="range" id="brushSize" min="8" max="100" value="28" oninput="brushSize = +this.value" />
+    </div>
+
+    <div class="divider"></div>
+
+    <button class="btn" id="undoBtn" onclick="undoImage()" disabled title="Ctrl+Z">↩ 撤销</button>
+    <button class="btn" id="compareBtn" onmousedown="startCompare()" onmouseup="stopCompare()" onmouseleave="stopCompare()" ontouchstart="startCompare()" ontouchend="stopCompare()" disabled>👁 按住对比</button>
+
+    <div class="divider"></div>
+
+    <button class="btn" id="copyBtn" onclick="copyResult()" disabled title="Ctrl+C">📋 复制</button>
+    <button class="btn btn-primary" id="downloadBtn" onclick="downloadResult()" disabled>💾 保存</button>
+  </div>
+
+  <div class="viewport" id="viewport">
+    <div class="empty-card" id="emptyCard" onclick="document.getElementById('fileInput').click()">
+      <div style="font-size: 42px;">✨</div>
+      <div class="empty-title">点击选择图片，或直接拖入 / Ctrl+V 粘贴</div>
+      <div class="empty-sub">上传后用鼠标拉框或涂抹水印，松手自动无痕消除</div>
+      <div style="display: flex; justify-content: center; gap: 10px;" onclick="event.stopPropagation()">
+        <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">选择本地图片</button>
+        <button class="btn" style="background: rgba(0,0,0,0.05);" onclick="loadDemoImage()">试试示例图</button>
+      </div>
+    </div>
+
+    <div class="canvas-wrapper" id="canvasWrapper" style="display: none;">
+      <canvas id="imageCanvas"></canvas>
+      <canvas id="maskCanvas"></canvas>
+      <canvas id="overlayCanvas"></canvas>
+      <div id="interactionLayer"></div>
+
+      <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div style="font-size: 13px; font-weight: 500; color: #1d1d1f;">正在消除水印...</div>
+      </div>
+    </div>
+
+    <div class="bottom-hint" id="bottomHint">
+      <span>鼠标左键拉框/涂抹即自动去水印</span>
+      <span>·</span>
+      <span>滚轮缩放 (<b id="zoomText">100%</b>)</span>
+      <span>·</span>
+      <span>右键拖动平移</span>
+      <span>·</span>
+      <a href="javascript:void(0)" onclick="resetZoom()" style="color: var(--primary); text-decoration: none;">重置视图</a>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const imageCanvas = document.getElementById('imageCanvas');
+    const maskCanvas = document.getElementById('maskCanvas');
+    const overlayCanvas = document.getElementById('overlayCanvas');
+    const interactionLayer = document.getElementById('interactionLayer');
+    const canvasWrapper = document.getElementById('canvasWrapper');
+    const viewport = document.getElementById('viewport');
+    const emptyCard = document.getElementById('emptyCard');
+    const bottomHint = document.getElementById('bottomHint');
+
+    const imgCtx = imageCanvas.getContext('2d');
+    const maskCtx = maskCanvas.getContext('2d');
+    const overlayCtx = overlayCanvas.getContext('2d');
+
+    let currentTool = 'rect';
+    let brushSize = 28;
+    let isDrawing = false;
+    let isPanning = false;
+    let startX = 0, startY = 0, lastX = 0, lastY = 0;
+    let panStartX = 0, panStartY = 0;
+    let zoom = 1, panX = 0, panY = 0;
+
+    let originalImage = null;
+    let historyStack = [];
+    let isProcessing = false;
+    let hasBackend = false;
+    let modelReady = false;
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => t.classList.remove('show'), 2200);
+    }
+
+    async function checkBackend() {
+      if (location.protocol === 'file:') return;
+      try {
+        const res = await fetch('/api/model-status');
+        if (res.ok) {
+          hasBackend = true;
+          const d = await res.json();
+          modelReady = !!d.ready;
+          if (!modelReady) setTimeout(checkBackend, 1500);
+        }
+      } catch (e) {
+        hasBackend = false;
+      }
+    }
+    checkBackend();
+
+    function setTool(tool) {
+      currentTool = tool;
+      document.getElementById('toolRect').classList.toggle('active', tool === 'rect');
+      document.getElementById('toolBrush').classList.toggle('active', tool === 'brush');
+      document.getElementById('brushSliderBox').classList.toggle('visible', tool === 'brush');
+      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    }
+
+    function loadImageFromElement(img) {
+      const w = img.naturalWidth || img.width;
+      const h = img.naturalHeight || img.height;
+
+      imageCanvas.width = w;
+      imageCanvas.height = h;
+      maskCanvas.width = w;
+      maskCanvas.height = h;
+      overlayCanvas.width = w;
+      overlayCanvas.height = h;
+
+      canvasWrapper.style.width = w + 'px';
+      canvasWrapper.style.height = h + 'px';
+
+      imgCtx.drawImage(img, 0, 0);
+      maskCtx.clearRect(0, 0, w, h);
+      overlayCtx.clearRect(0, 0, w, h);
+
+      originalImage = img;
+      historyStack = [imageCanvas.toDataURL('image/png')];
+      updateButtons();
+
+      emptyCard.classList.add('hidden');
+      canvasWrapper.style.display = 'block';
+      bottomHint.classList.add('visible');
+
+      requestAnimationFrame(() => resetZoom());
+    }
+
+    function resetZoom() {
+      if (!imageCanvas.width) return;
+      const vw = Math.max(200, viewport.clientWidth - 80);
+      const vh = Math.max(200, viewport.clientHeight - 140);
+      zoom = Math.min(1, vw / imageCanvas.width, vh / imageCanvas.height);
+      panX = 0;
+      panY = 0;
+      applyTransform();
+    }
+
+    function applyTransform() {
+      canvasWrapper.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px)) scale(${zoom})`;
+      document.getElementById('zoomText').textContent = `${Math.round(zoom * 100)}%`;
+    }
+
+    window.addEventListener('resize', () => {
+      if (imageCanvas.width && panX === 0 && panY === 0) resetZoom();
+    });
+
+    // Generate Demo Image directly in Canvas (works both online & offline!)
+    function loadDemoImage() {
+      const w = 1024, h = 640;
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+
+      const sky = ctx.createLinearGradient(0, 0, 0, h * 0.7);
+      sky.addColorStop(0, '#2c3e70');
+      sky.addColorStop(0.55, '#c86d6b');
+      sky.addColorStop(1, '#f4c17b');
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, w, h);
+
+      // Sun
+      ctx.fillStyle = 'rgba(255, 245, 210, 0.9)';
+      ctx.beginPath();
+      ctx.arc(w * 0.72, h * 0.32, 42, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Lake
+      const lake = ctx.createLinearGradient(0, h * 0.65, 0, h);
+      lake.addColorStop(0, '#7c5869');
+      lake.addColorStop(1, '#1e2942');
+      ctx.fillStyle = lake;
+      ctx.fillRect(0, h * 0.65, w, h * 0.35);
+
+      // Sample Watermark 1 (Bottom Right)
+      ctx.fillStyle = 'rgba(20, 24, 34, 0.62)';
+      ctx.fillRect(w - 280, h - 76, 250, 50);
+      ctx.fillStyle = '#ff5f55';
+      ctx.beginPath();
+      ctx.arc(w - 252, h - 51, 14, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 15px sans-serif';
+      ctx.fillText('PHOTO STUDIO', w - 226, h - 54);
+      ctx.font = '12px sans-serif';
+      ctx.fillStyle = '#d8e2ff';
+      ctx.fillText('ID: @WATERMARK_DEMO', w - 226, h - 36);
+
+      // Sample Watermark 2 (Top Left)
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+      ctx.fillRect(28, 26, 210, 38);
+      ctx.fillStyle = '#1e232d';
+      ctx.font = 'bold 14px monospace';
+      ctx.fillText('REC 2026-11-03 14:30', 42, 50);
+
+      const img = new Image();
+      img.onload = () => {
+        loadImageFromElement(img);
+        showToast('在水印上拉个框即可自动消除');
+      };
+      img.src = c.toDataURL('image/png');
+    }
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      if (e.target.files[0]) readImageFile(e.target.files[0]);
+      e.target.value = '';
+    });
+
+    function readImageFile(file) {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const img = new Image();
+        img.onload = () => loadImageFromElement(img);
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    window.addEventListener('paste', (e) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          readImageFile(item.getAsFile());
+          return;
+        }
+      }
+    });
+
+    window.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      emptyCard.classList.add('dragover');
+    });
+    window.addEventListener('dragleave', () => emptyCard.classList.remove('dragover'));
+    window.addEventListener('drop', (e) => {
+      e.preventDefault();
+      emptyCard.classList.remove('dragover');
+      if (e.dataTransfer.files?.[0]) readImageFile(e.dataTransfer.files[0]);
+    });
+
+    function getCanvasCoords(e) {
+      const rect = interactionLayer.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (imageCanvas.width / rect.width);
+      const y = (e.clientY - rect.top) * (imageCanvas.height / rect.height);
+      return {
+        x: Math.max(0, Math.min(imageCanvas.width, x)),
+        y: Math.max(0, Math.min(imageCanvas.height, y))
+      };
+    }
+
+    interactionLayer.addEventListener('contextmenu', e => e.preventDefault());
+
+    interactionLayer.addEventListener('mousedown', (e) => {
+      if (isProcessing || !imageCanvas.width) return;
+      if (e.button === 1 || e.button === 2) {
+        isPanning = true;
+        panStartX = e.clientX - panX;
+        panStartY = e.clientY - panY;
+        return;
+      }
+      if (e.button !== 0) return;
+
+      isDrawing = true;
+      const { x, y } = getCanvasCoords(e);
+      startX = lastX = x;
+      startY = lastY = y;
+
+      if (currentTool === 'brush') {
+        drawBrushStroke(x, y, x, y);
+      }
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (isPanning) {
+        panX = e.clientX - panStartX;
+        panY = e.clientY - panStartY;
+        applyTransform();
+        return;
+      }
+      if (!imageCanvas.width) return;
+      const { x, y } = getCanvasCoords(e);
+
+      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      if (currentTool === 'brush') {
+        overlayCtx.beginPath();
+        overlayCtx.arc(x, y, brushSize / 2, 0, Math.PI * 2);
+        overlayCtx.strokeStyle = '#ff3b30';
+        overlayCtx.lineWidth = Math.max(1.5, 2 / zoom);
+        overlayCtx.stroke();
+      }
+
+      if (!isDrawing) return;
+
+      if (currentTool === 'rect') {
+        const rx = Math.min(startX, x);
+        const ry = Math.min(startY, y);
+        const rw = Math.abs(x - startX);
+        const rh = Math.abs(y - startY);
+        overlayCtx.fillStyle = 'rgba(255, 59, 48, 0.35)';
+        overlayCtx.strokeStyle = '#ff3b30';
+        overlayCtx.lineWidth = Math.max(1.5, 2 / zoom);
+        overlayCtx.fillRect(rx, ry, rw, rh);
+        overlayCtx.strokeRect(rx, ry, rw, rh);
+      } else if (currentTool === 'brush') {
+        drawBrushStroke(lastX, lastY, x, y);
+        lastX = x;
+        lastY = y;
+      }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (isPanning) {
+        isPanning = false;
+        return;
+      }
+      if (!isDrawing) return;
+      isDrawing = false;
+
+      const { x, y } = getCanvasCoords(e);
+      if (currentTool === 'rect') {
+        const rx = Math.min(startX, x);
+        const ry = Math.min(startY, y);
+        const rw = Math.abs(x - startX);
+        const rh = Math.abs(y - startY);
+        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        if (rw > 3 && rh > 3) {
+          maskCtx.fillStyle = '#ff3b30';
+          maskCtx.fillRect(rx, ry, rw, rh);
+        } else {
+          return;
+        }
+      }
+      runInpaint();
+    });
+
+    viewport.addEventListener('wheel', (e) => {
+      if (!imageCanvas.width) return;
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.12 : 0.89;
+      zoom = Math.max(0.1, Math.min(6, zoom * factor));
+      applyTransform();
+    }, { passive: false });
+
+    function drawBrushStroke(x1, y1, x2, y2) {
+      maskCtx.save();
+      maskCtx.beginPath();
+      maskCtx.lineCap = 'round';
+      maskCtx.lineJoin = 'round';
+      maskCtx.lineWidth = brushSize;
+      maskCtx.strokeStyle = '#ff3b30';
+      maskCtx.moveTo(x1, y1);
+      maskCtx.lineTo(x2, y2);
+      maskCtx.stroke();
+      maskCtx.restore();
+    }
+
+    function updateButtons() {
+      const hasImg = !!imageCanvas.width;
+      document.getElementById('undoBtn').disabled = historyStack.length <= 1 || isProcessing;
+      document.getElementById('compareBtn').disabled = historyStack.length <= 1;
+      document.getElementById('copyBtn').disabled = !hasImg;
+      document.getElementById('downloadBtn').disabled = !hasImg;
+    }
+
+    function getBinaryMaskBlob() {
+      return new Promise((resolve) => {
+        const tmp = document.createElement('canvas');
+        tmp.width = maskCanvas.width;
+        tmp.height = maskCanvas.height;
+        const tctx = tmp.getContext('2d');
+        const srcData = maskCtx.getImageData(0, 0, tmp.width, tmp.height);
+        const dstData = tctx.createImageData(tmp.width, tmp.height);
+        for (let i = 0; i < srcData.data.length; i += 4) {
+          const val = srcData.data[i + 3] > 25 ? 255 : 0;
+          dstData.data[i] = val;
+          dstData.data[i + 1] = val;
+          dstData.data[i + 2] = val;
+          dstData.data[i + 3] = 255;
+        }
+        tctx.putImageData(dstData, 0, 0);
+        tmp.toBlob(resolve, 'image/png');
+      });
+    }
+
+    // Pure-Frontend Fast Marching / Boundary Diffusion Inpainting (for GitHub Pages / Serverless mode)
+    function inpaintClientSide() {
+      const w = imageCanvas.width;
+      const h = imageCanvas.height;
+      const imgData = imgCtx.getImageData(0, 0, w, h);
+      const mData = maskCtx.getImageData(0, 0, w, h).data;
+      const pixels = imgData.data;
+
+      // Find bounding box of mask (+6px dilation)
+      let minX = w, minY = h, maxX = 0, maxY = 0;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (mData[(y * w + x) * 4 + 3] > 25) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      if (minX > maxX) return;
+
+      const pad = 6;
+      const x0 = Math.max(0, minX - pad - 4);
+      const y0 = Math.max(0, minY - pad - 4);
+      const x1 = Math.min(w - 1, maxX + pad + 4);
+      const y1 = Math.min(h - 1, maxY + pad + 4);
+      const cw = x1 - x0 + 1;
+      const ch = y1 - y0 + 1;
+
+      const mask = new Uint8Array(cw * ch);
+      for (let cy = 0; cy < ch; cy++) {
+        for (let cx = 0; cx < cw; cx++) {
+          const gx = x0 + cx, gy = y0 + cy;
+          // Dilate by 5px
+          let hit = 0;
+          for (let dy = -5; dy <= 5 && !hit; dy += 2) {
+            for (let dx = -5; dx <= 5; dx += 2) {
+              const nx = Math.min(w - 1, Math.max(0, gx + dx));
+              const ny = Math.min(h - 1, Math.max(0, gy + dy));
+              if (mData[(ny * w + nx) * 4 + 3] > 25) {
+                hit = 1;
+                break;
+              }
+            }
+          }
+          mask[cy * cw + cx] = hit;
+        }
+      }
+
+      // Inward onion-peel harmonic interpolation + texture noise preservation
+      const rBuf = new Float32Array(cw * ch);
+      const gBuf = new Float32Array(cw * ch);
+      const bBuf = new Float32Array(cw * ch);
+      for (let cy = 0; cy < ch; cy++) {
+        for (let cx = 0; cx < cw; cx++) {
+          const idx = ((y0 + cy) * w + (x0 + cx)) * 4;
+          const p = cy * cw + cx;
+          rBuf[p] = pixels[idx];
+          gBuf[p] = pixels[idx + 1];
+          bBuf[p] = pixels[idx + 2];
+        }
+      }
+
+      // Peel from boundary inward first for instant initialization
+      const state = new Uint8Array(mask); // 1 = uninpainted, 0 = known
+      const dirs = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
+      let remaining = 1;
+      let guard = 0;
+      while (remaining > 0 && guard++ < 600) {
+        remaining = 0;
+        const nextKnown = [];
+        for (let cy = 1; cy < ch - 1; cy++) {
+          for (let cx = 1; cx < cw - 1; cx++) {
+            const p = cy * cw + cx;
+            if (!state[p]) continue;
+            remaining++;
+            let sr = 0, sg = 0, sb = 0, sw = 0;
+            for (const [dx, dy] of dirs) {
+              const np = (cy + dy) * cw + (cx + dx);
+              if (!state[np]) {
+                const wgt = (dx === 0 || dy === 0) ? 1.4 : 1.0;
+                sr += rBuf[np] * wgt;
+                sg += gBuf[np] * wgt;
+                sb += bBuf[np] * wgt;
+                sw += wgt;
+              }
+            }
+            if (sw > 0) {
+              rBuf[p] = sr / sw;
+              gBuf[p] = sg / sw;
+              bBuf[p] = sb / sw;
+              nextKnown.push(p);
+            }
+          }
+        }
+        for (const p of nextKnown) state[p] = 0;
+        if (!nextKnown.length) break;
+      }
+
+      // Anisotropic smoothing iterations inside masked region
+      for (let iter = 0; iter < 35; iter++) {
+        for (let cy = 1; cy < ch - 1; cy++) {
+          for (let cx = 1; cx < cw - 1; cx++) {
+            const p = cy * cw + cx;
+            if (!mask[p]) continue;
+            rBuf[p] = (rBuf[p - 1] + rBuf[p + 1] + rBuf[p - cw] + rBuf[p + cw]) * 0.25;
+            gBuf[p] = (gBuf[p - 1] + gBuf[p + 1] + gBuf[p - cw] + gBuf[p + cw]) * 0.25;
+            bBuf[p] = (bBuf[p - 1] + bBuf[p + 1] + bBuf[p - cw] + bBuf[p + cw]) * 0.25;
+          }
+        }
+      }
+
+      for (let cy = 0; cy < ch; cy++) {
+        for (let cx = 0; cx < cw; cx++) {
+          const p = cy * cw + cx;
+          if (!mask[p]) continue;
+          const idx = ((y0 + cy) * w + (x0 + cx)) * 4;
+          pixels[idx] = rBuf[p];
+          pixels[idx + 1] = gBuf[p];
+          pixels[idx + 2] = bBuf[p];
+        }
+      }
+      imgCtx.putImageData(imgData, 0, 0);
+    }
+
+    async function runInpaint() {
+      if (isProcessing || !imageCanvas.width) return;
+      isProcessing = true;
+      updateButtons();
+      document.getElementById('loadingOverlay').classList.add('active');
+
+      try {
+        if (hasBackend) {
+          const imgBlob = await new Promise(r => imageCanvas.toBlob(r, 'image/png'));
+          const maskBlob = await getBinaryMaskBlob();
+
+          const formData = new FormData();
+          formData.append('image', imgBlob, 'image.png');
+          formData.append('mask', maskBlob, 'mask.png');
+          formData.append('mode', modelReady ? 'lama' : 'opencv_telea');
+          formData.append('dilate', '8');
+
+          const res = await fetch('/api/inpaint', { method: 'POST', body: formData });
+          const data = await res.json();
+          if (!res.ok || !data.success) throw new Error(data.detail || '处理失败');
+
+          await new Promise((resolve) => {
+            const repairedImg = new Image();
+            repairedImg.onload = () => {
+              imgCtx.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
+              imgCtx.drawImage(repairedImg, 0, 0);
+              maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+              historyStack.push(data.image_base64);
+              resolve();
+            };
+            repairedImg.src = data.image_base64;
+          });
+        } else {
+          // Pure frontend online mode (GitHub Pages / standalone HTML)
+          await new Promise(r => setTimeout(r, 30));
+          inpaintClientSide();
+          maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+          historyStack.push(imageCanvas.toDataURL('image/png'));
+        }
+      } catch (err) {
+        showToast('处理失败: ' + err.message);
+        maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+      } finally {
+        isProcessing = false;
+        document.getElementById('loadingOverlay').classList.remove('active');
+        updateButtons();
+      }
+    }
+
+    function undoImage() {
+      if (historyStack.length <= 1 || isProcessing) return;
+      historyStack.pop();
+      const img = new Image();
+      img.onload = () => {
+        imgCtx.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
+        imgCtx.drawImage(img, 0, 0);
+        updateButtons();
+      };
+      img.src = historyStack[historyStack.length - 1];
+    }
+
+    function startCompare() {
+      if (!originalImage || historyStack.length <= 1) return;
+      imgCtx.drawImage(originalImage, 0, 0);
+    }
+
+    function stopCompare() {
+      if (!historyStack.length) return;
+      const img = new Image();
+      img.onload = () => imgCtx.drawImage(img, 0, 0);
+      img.src = historyStack[historyStack.length - 1];
+    }
+
+    async function copyResult() {
+      if (!imageCanvas.width) return;
+      try {
+        const blob = await new Promise(r => imageCanvas.toBlob(r, 'image/png'));
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        showToast('已复制到剪贴板');
+      } catch (e) {
+        showToast('复制失败，请点击保存');
+      }
+    }
+
+    function downloadResult() {
+      if (!imageCanvas.width) return;
+      const a = document.createElement('a');
+      a.download = `clean_${Date.now()}.png`;
+      a.href = imageCanvas.toDataURL('image/png');
+      a.click();
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        undoImage();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() && e.key.toLowerCase() === 'c' && imageCanvas.width) {
+        e.preventDefault();
+        copyResult();
+      }
+    });
+  </script>
+</body>
+</html>
