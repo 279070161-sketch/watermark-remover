@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>极简去水印</title>
+  <title>极简去水印 · AI 无痕版</title>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
   <style>
     :root {
       --bg: #f5f5f7;
@@ -44,7 +45,7 @@
       border: 1px solid var(--border);
       box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
       border-radius: 999px;
-      padding: 6px 10px;
+      padding: 6px 12px;
       display: flex;
       align-items: center;
       gap: 6px;
@@ -95,6 +96,21 @@
 
     .btn-primary:hover:not(:disabled) {
       background: var(--primary-hover);
+    }
+
+    .ai-badge {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: rgba(0, 113, 227, 0.08);
+      color: var(--primary);
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .ai-badge.ready {
+      background: rgba(16, 185, 129, 0.12);
+      color: #059669;
     }
 
     .brush-slider {
@@ -223,7 +239,7 @@
     .loading-overlay {
       position: absolute;
       inset: 0;
-      background: rgba(255, 255, 255, 0.65);
+      background: rgba(255, 255, 255, 0.72);
       backdrop-filter: blur(4px);
       display: none;
       flex-direction: column;
@@ -298,13 +314,15 @@
 
     <button class="btn" id="copyBtn" onclick="copyResult()" disabled title="Ctrl+C">📋 复制</button>
     <button class="btn btn-primary" id="downloadBtn" onclick="downloadResult()" disabled>💾 保存</button>
+
+    <span class="ai-badge" id="aiBadge">⏳ 准备 AI 引擎...</span>
   </div>
 
   <div class="viewport" id="viewport">
     <div class="empty-card" id="emptyCard" onclick="document.getElementById('fileInput').click()">
       <div style="font-size: 42px;">✨</div>
       <div class="empty-title">点击选择图片，或直接拖入 / Ctrl+V 粘贴</div>
-      <div class="empty-sub">上传后用鼠标拉框或涂抹水印，松手自动无痕消除</div>
+      <div class="empty-sub">搭载 AI LaMa 深度学习无痕修复，框选或涂抹水印松手自动消除</div>
       <div style="display: flex; justify-content: center; gap: 10px;" onclick="event.stopPropagation()">
         <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">选择本地图片</button>
         <button class="btn" style="background: rgba(0,0,0,0.05);" onclick="loadDemoImage()">试试示例图</button>
@@ -319,7 +337,7 @@
 
       <div class="loading-overlay" id="loadingOverlay">
         <div class="spinner"></div>
-        <div style="font-size: 13px; font-weight: 500; color: #1d1d1f;">正在消除水印...</div>
+        <div style="font-size: 13px; font-weight: 500; color: #1d1d1f;" id="loadingMsg">AI 正在无痕消除水印...</div>
       </div>
     </div>
 
@@ -345,6 +363,8 @@
     const viewport = document.getElementById('viewport');
     const emptyCard = document.getElementById('emptyCard');
     const bottomHint = document.getElementById('bottomHint');
+    const aiBadge = document.getElementById('aiBadge');
+    const loadingMsg = document.getElementById('loadingMsg');
 
     const imgCtx = imageCanvas.getContext('2d');
     const maskCtx = maskCanvas.getContext('2d');
@@ -361,32 +381,162 @@
     let originalImage = null;
     let historyStack = [];
     let isProcessing = false;
-    let hasBackend = false;
-    let modelReady = false;
+
+    // Engine state: either local Python server OR browser ONNX Runtime Web LaMa session
+    let backendBaseUrl = null;
+    let ortSession = null;
+    let ortInitPromise = null;
+
+    const MODEL_URLS = [
+      'https://hf-mirror.com/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',
+      'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx'
+    ];
+    const DB_NAME = 'LaMaModelCacheDB';
+    const STORE_NAME = 'models';
+    const MODEL_KEY = 'lama_fp32_v1';
 
     function showToast(msg) {
       const t = document.getElementById('toast');
       t.textContent = msg;
       t.classList.add('show');
       clearTimeout(t._timer);
-      t._timer = setTimeout(() => t.classList.remove('show'), 2200);
+      t._timer = setTimeout(() => t.classList.remove('show'), 2400);
     }
 
-    async function checkBackend() {
-      if (location.protocol === 'file:') return;
+    // IndexedDB helpers to cache the 198MB LaMa ONNX model permanently in browser
+    function openModelDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+          e.target.result.createObjectStore(STORE_NAME);
+        };
+        req.onsuccess = (e) => resolve(e.target.result);
+        req.onerror = (e) => reject(e.target.error);
+      });
+    }
+
+    async function getCachedModel() {
       try {
-        const res = await fetch('/api/model-status');
-        if (res.ok) {
-          hasBackend = true;
-          const d = await res.json();
-          modelReady = !!d.ready;
-          if (!modelReady) setTimeout(checkBackend, 1500);
-        }
-      } catch (e) {
-        hasBackend = false;
+        const db = await openModelDB();
+        return await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readonly');
+          const req = tx.objectStore(STORE_NAME).get(MODEL_KEY);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => resolve(null);
+        });
+      } catch {
+        return null;
       }
     }
-    checkBackend();
+
+    async function saveCachedModel(buffer) {
+      try {
+        const db = await openModelDB();
+        await new Promise((resolve) => {
+          const tx = db.transaction(STORE_NAME, 'readwrite');
+          tx.objectStore(STORE_NAME).put(buffer, MODEL_KEY);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+      } catch {}
+    }
+
+    // Initialize AI Engine: Check local server first; if online, load LaMa ONNX in browser!
+    async function initAIEngine() {
+      // 1. Try same-origin or local Python backend (127.0.0.1:8765)
+      const candidates = [];
+      if (location.protocol.startsWith('http')) {
+        candidates.push('');
+      }
+      candidates.push('http://127.0.0.1:8765');
+
+      for (const base of candidates) {
+        try {
+          const ctrl = new AbortController();
+          setTimeout(() => ctrl.abort(), 1200);
+          const res = await fetch(`${base}/api/model-status`, { signal: ctrl.signal });
+          if (res.ok) {
+            const d = await res.json();
+            if (d.ready) {
+              backendBaseUrl = base;
+              aiBadge.textContent = '✨ AI 无痕引擎已就绪';
+              aiBadge.classList.add('ready');
+              return;
+            }
+          }
+        } catch {}
+      }
+
+      // 2. Pure Online Mode: Load real LaMa ONNX model in Browser via ONNX Runtime Web!
+      if (!ortInitPromise) {
+        ortInitPromise = loadBrowserLaMaSession();
+      }
+      await ortInitPromise;
+    }
+
+    async function loadBrowserLaMaSession() {
+      try {
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
+        ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 2);
+
+        let modelBuffer = await getCachedModel();
+        if (!modelBuffer || modelBuffer.byteLength < 50 * 1024 * 1024) {
+          aiBadge.textContent = '⏳ 首次下载 AI 模型 0%...';
+          let downloaded = false;
+          for (const url of MODEL_URLS) {
+            try {
+              const res = await fetch(url);
+              if (!res.ok) continue;
+              const total = parseInt(res.headers.get('Content-Length') || '208044816', 10);
+              const reader = res.body.getReader();
+              const chunks = [];
+              let received = 0;
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+                received += value.byteLength;
+                const pct = Math.min(99, Math.round((received * 100) / total));
+                aiBadge.textContent = `⏳ 首次加载 AI 引擎 ${pct}%`;
+                if (isProcessing) {
+                  loadingMsg.textContent = `首次加载 AI 无痕模型 (${pct}%)，加载后永久缓存...`;
+                }
+              }
+              const merged = new Uint8Array(received);
+              let offset = 0;
+              for (const c of chunks) {
+                merged.set(c, offset);
+                offset += c.byteLength;
+              }
+              if (merged.byteLength > 50 * 1024 * 1024) {
+                modelBuffer = merged.buffer;
+                await saveCachedModel(modelBuffer);
+                downloaded = true;
+                break;
+              }
+            } catch (e) {
+              console.warn('Model URL failed:', url, e);
+            }
+          }
+          if (!downloaded) throw new Error('AI 模型下载失败，请检查网络');
+        } else {
+          aiBadge.textContent = '⏳ 正在初始化 AI 引擎...';
+        }
+
+        ortSession = await ort.InferenceSession.create(modelBuffer, {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'all'
+        });
+
+        aiBadge.textContent = '✨ AI 无痕引擎已就绪';
+        aiBadge.classList.add('ready');
+      } catch (err) {
+        aiBadge.textContent = '⚠️ AI 引擎加载失败';
+        console.error(err);
+      }
+    }
+
+    initAIEngine();
 
     function setTool(tool) {
       currentTool = tool;
@@ -444,7 +594,6 @@
       if (imageCanvas.width && panX === 0 && panY === 0) resetZoom();
     });
 
-    // Generate Demo Image directly in Canvas (works both online & offline!)
     function loadDemoImage() {
       const w = 1024, h = 640;
       const c = document.createElement('canvas');
@@ -458,20 +607,17 @@
       ctx.fillStyle = sky;
       ctx.fillRect(0, 0, w, h);
 
-      // Sun
       ctx.fillStyle = 'rgba(255, 245, 210, 0.9)';
       ctx.beginPath();
       ctx.arc(w * 0.72, h * 0.32, 42, 0, Math.PI * 2);
       ctx.fill();
 
-      // Lake
       const lake = ctx.createLinearGradient(0, h * 0.65, 0, h);
       lake.addColorStop(0, '#7c5869');
       lake.addColorStop(1, '#1e2942');
       ctx.fillStyle = lake;
       ctx.fillRect(0, h * 0.65, w, h * 0.35);
 
-      // Sample Watermark 1 (Bottom Right)
       ctx.fillStyle = 'rgba(20, 24, 34, 0.62)';
       ctx.fillRect(w - 280, h - 76, 250, 50);
       ctx.fillStyle = '#ff5f55';
@@ -485,7 +631,6 @@
       ctx.fillStyle = '#d8e2ff';
       ctx.fillText('ID: @WATERMARK_DEMO', w - 226, h - 36);
 
-      // Sample Watermark 2 (Top Left)
       ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
       ctx.fillRect(28, 26, 210, 38);
       ctx.fillStyle = '#1e232d';
@@ -495,7 +640,7 @@
       const img = new Image();
       img.onload = () => {
         loadImageFromElement(img);
-        showToast('在水印上拉个框即可自动消除');
+        showToast('在水印上拉个框即可自动无痕消除');
       };
       img.src = c.toDataURL('image/png');
     }
@@ -681,16 +826,21 @@
       });
     }
 
-    // Pure-Frontend Fast Marching / Boundary Diffusion Inpainting (for GitHub Pages / Serverless mode)
-    function inpaintClientSide() {
+    // Browser-side AI LaMa 512x512 Smart Patch Inpainting (identical logic to Python InpaintEngine)
+    async function inpaintBrowserLaMa() {
+      if (!ortSession) {
+        if (!ortInitPromise) ortInitPromise = loadBrowserLaMaSession();
+        await ortInitPromise;
+      }
+      if (!ortSession) {
+        throw new Error('AI 模型尚未就绪，请稍候重试');
+      }
+
       const w = imageCanvas.width;
       const h = imageCanvas.height;
-      const imgData = imgCtx.getImageData(0, 0, w, h);
       const mData = maskCtx.getImageData(0, 0, w, h).data;
-      const pixels = imgData.data;
 
-      // Find bounding box of mask (+6px dilation)
-      let minX = w, minY = h, maxX = 0, maxY = 0;
+      let minX = w, minY = h, maxX = -1, maxY = -1;
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
           if (mData[(y * w + x) * 4 + 3] > 25) {
@@ -701,130 +851,124 @@
           }
         }
       }
-      if (minX > maxX) return;
+      if (maxX < 0) return;
 
-      const pad = 6;
-      const x0 = Math.max(0, minX - pad - 4);
-      const y0 = Math.max(0, minY - pad - 4);
-      const x1 = Math.min(w - 1, maxX + pad + 4);
-      const y1 = Math.min(h - 1, maxY + pad + 4);
-      const cw = x1 - x0 + 1;
-      const ch = y1 - y0 + 1;
+      // Expand bounding box by 8px dilation
+      const dilate = 8;
+      minX = Math.max(0, minX - dilate);
+      minY = Math.max(0, minY - dilate);
+      maxX = Math.min(w - 1, maxX + dilate);
+      maxY = Math.min(h - 1, maxY + dilate);
 
-      const mask = new Uint8Array(cw * ch);
-      for (let cy = 0; cy < ch; cy++) {
-        for (let cx = 0; cx < cw; cx++) {
-          const gx = x0 + cx, gy = y0 + cy;
-          // Dilate by 5px
-          let hit = 0;
-          for (let dy = -5; dy <= 5 && !hit; dy += 2) {
-            for (let dx = -5; dx <= 5; dx += 2) {
-              const nx = Math.min(w - 1, Math.max(0, gx + dx));
-              const ny = Math.min(h - 1, Math.max(0, gy + dy));
-              if (mData[(ny * w + nx) * 4 + 3] > 25) {
-                hit = 1;
-                break;
-              }
-            }
-          }
-          mask[cy * cw + cx] = hit;
-        }
-      }
+      const bw = maxX - minX + 1;
+      const bh = maxY - minY + 1;
+      const cx = Math.floor((minX + maxX) / 2);
+      const cy = Math.floor((minY + maxY) / 2);
 
-      // Inward onion-peel harmonic interpolation + texture noise preservation
-      const rBuf = new Float32Array(cw * ch);
-      const gBuf = new Float32Array(cw * ch);
-      const bBuf = new Float32Array(cw * ch);
-      for (let cy = 0; cy < ch; cy++) {
-        for (let cx = 0; cx < cw; cx++) {
-          const idx = ((y0 + cy) * w + (x0 + cx)) * 4;
-          const p = cy * cw + cx;
-          rBuf[p] = pixels[idx];
-          gBuf[p] = pixels[idx + 1];
-          bBuf[p] = pixels[idx + 2];
-        }
-      }
+      // Determine square context window (at least 512x512 for 1:1 native pixel resolution)
+      const cropSize = Math.max(512, Math.round(Math.max(bw, bh) * 1.4));
+      let x1 = cx - Math.floor(cropSize / 2);
+      let y1 = cy - Math.floor(cropSize / 2);
+      let x2 = x1 + cropSize;
+      let y2 = y1 + cropSize;
 
-      // Peel from boundary inward first for instant initialization
-      const state = new Uint8Array(mask); // 1 = uninpainted, 0 = known
-      const dirs = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
-      let remaining = 1;
-      let guard = 0;
-      while (remaining > 0 && guard++ < 600) {
-        remaining = 0;
-        const nextKnown = [];
-        for (let cy = 1; cy < ch - 1; cy++) {
-          for (let cx = 1; cx < cw - 1; cx++) {
-            const p = cy * cw + cx;
-            if (!state[p]) continue;
-            remaining++;
-            let sr = 0, sg = 0, sb = 0, sw = 0;
-            for (const [dx, dy] of dirs) {
-              const np = (cy + dy) * cw + (cx + dx);
-              if (!state[np]) {
-                const wgt = (dx === 0 || dy === 0) ? 1.4 : 1.0;
-                sr += rBuf[np] * wgt;
-                sg += gBuf[np] * wgt;
-                sb += bBuf[np] * wgt;
-                sw += wgt;
-              }
-            }
-            if (sw > 0) {
-              rBuf[p] = sr / sw;
-              gBuf[p] = sg / sw;
-              bBuf[p] = sb / sw;
-              nextKnown.push(p);
-            }
-          }
-        }
-        for (const p of nextKnown) state[p] = 0;
-        if (!nextKnown.length) break;
-      }
+      if (x1 < 0) { x2 -= x1; x1 = 0; }
+      if (y1 < 0) { y2 -= y1; y1 = 0; }
+      if (x2 > w) { x1 = Math.max(0, x1 - (x2 - w)); x2 = w; }
+      if (y2 > h) { y1 = Math.max(0, y1 - (y2 - h)); y2 = h; }
 
-      // Anisotropic smoothing iterations inside masked region
-      for (let iter = 0; iter < 35; iter++) {
-        for (let cy = 1; cy < ch - 1; cy++) {
-          for (let cx = 1; cx < cw - 1; cx++) {
-            const p = cy * cw + cx;
-            if (!mask[p]) continue;
-            rBuf[p] = (rBuf[p - 1] + rBuf[p + 1] + rBuf[p - cw] + rBuf[p + cw]) * 0.25;
-            gBuf[p] = (gBuf[p - 1] + gBuf[p + 1] + gBuf[p - cw] + gBuf[p + cw]) * 0.25;
-            bBuf[p] = (bBuf[p - 1] + bBuf[p + 1] + bBuf[p - cw] + bBuf[p + cw]) * 0.25;
+      const cw = x2 - x1;
+      const ch = y2 - y1;
+
+      // Prepare 512x512 input canvases for image and dilated binary mask
+      const patchImgCanvas = document.createElement('canvas');
+      patchImgCanvas.width = 512;
+      patchImgCanvas.height = 512;
+      const patchImgCtx = patchImgCanvas.getContext('2d');
+      patchImgCtx.drawImage(imageCanvas, x1, y1, cw, ch, 0, 0, 512, 512);
+
+      const patchMaskCanvas = document.createElement('canvas');
+      patchMaskCanvas.width = 512;
+      patchMaskCanvas.height = 512;
+      const patchMaskCtx = patchMaskCanvas.getContext('2d');
+      const rDilate = Math.max(2, Math.round((dilate * 512) / Math.max(cw, ch)));
+      patchMaskCtx.filter = 'blur(2px)';
+      for (let dy = -rDilate; dy <= rDilate; dy += Math.max(1, Math.floor(rDilate / 2))) {
+        for (let dx = -rDilate; dx <= rDilate; dx += Math.max(1, Math.floor(rDilate / 2))) {
+          if (dx * dx + dy * dy <= rDilate * rDilate + 1) {
+            patchMaskCtx.drawImage(maskCanvas, x1, y1, cw, ch, dx, dy, 512, 512);
           }
         }
       }
+      patchMaskCtx.filter = 'none';
 
-      for (let cy = 0; cy < ch; cy++) {
-        for (let cx = 0; cx < cw; cx++) {
-          const p = cy * cw + cx;
-          if (!mask[p]) continue;
-          const idx = ((y0 + cy) * w + (x0 + cx)) * 4;
-          pixels[idx] = rBuf[p];
-          pixels[idx + 1] = gBuf[p];
-          pixels[idx + 2] = bBuf[p];
-        }
+      const imgPixels = patchImgCtx.getImageData(0, 0, 512, 512).data;
+      const maskPixels = patchMaskCtx.getImageData(0, 0, 512, 512).data;
+
+      const imgFloat = new Float32Array(3 * 512 * 512);
+      const maskFloat = new Float32Array(1 * 512 * 512);
+      const planeSize = 512 * 512;
+
+      for (let i = 0; i < planeSize; i++) {
+        const p = i * 4;
+        imgFloat[i] = imgPixels[p] / 255.0;
+        imgFloat[planeSize + i] = imgPixels[p + 1] / 255.0;
+        imgFloat[planeSize * 2 + i] = imgPixels[p + 2] / 255.0;
+        maskFloat[i] = maskPixels[p + 3] > 20 ? 1.0 : 0.0;
       }
-      imgCtx.putImageData(imgData, 0, 0);
+
+      const feeds = {
+        image: new ort.Tensor('float32', imgFloat, [1, 3, 512, 512]),
+        mask: new ort.Tensor('float32', maskFloat, [1, 1, 512, 512])
+      };
+
+      const results = await ortSession.run(feeds);
+      const outData = results.output.data;
+
+      let scale = 1.0;
+      for (let i = 0; i < 1000; i++) {
+        if (outData[i] > 1.5) { scale = 1.0; break; }
+        scale = 255.0;
+      }
+
+      const outImgData = patchImgCtx.createImageData(512, 512);
+      for (let i = 0; i < planeSize; i++) {
+        const p = i * 4;
+        const mAlpha = Math.min(1.0, maskPixels[p + 3] / 128.0); // soft feather edge
+        const rRep = Math.min(255, Math.max(0, outData[i] * scale));
+        const gRep = Math.min(255, Math.max(0, outData[planeSize + i] * scale));
+        const bRep = Math.min(255, Math.max(0, outData[planeSize * 2 + i] * scale));
+
+        outImgData.data[p] = rRep * mAlpha + imgPixels[p] * (1 - mAlpha);
+        outImgData.data[p + 1] = gRep * mAlpha + imgPixels[p + 1] * (1 - mAlpha);
+        outImgData.data[p + 2] = bRep * mAlpha + imgPixels[p + 2] * (1 - mAlpha);
+        outImgData.data[p + 3] = 255;
+      }
+      patchImgCtx.putImageData(outImgData, 0, 0);
+
+      // Composite repaired patch back onto original full-res image
+      imgCtx.drawImage(patchImgCanvas, 0, 0, 512, 512, x1, y1, cw, ch);
     }
 
     async function runInpaint() {
       if (isProcessing || !imageCanvas.width) return;
       isProcessing = true;
       updateButtons();
+      loadingMsg.textContent = 'AI 正在无痕消除水印...';
       document.getElementById('loadingOverlay').classList.add('active');
 
       try {
-        if (hasBackend) {
+        if (backendBaseUrl !== null) {
           const imgBlob = await new Promise(r => imageCanvas.toBlob(r, 'image/png'));
           const maskBlob = await getBinaryMaskBlob();
 
           const formData = new FormData();
           formData.append('image', imgBlob, 'image.png');
           formData.append('mask', maskBlob, 'mask.png');
-          formData.append('mode', modelReady ? 'lama' : 'opencv_telea');
+          formData.append('mode', 'lama');
           formData.append('dilate', '8');
 
-          const res = await fetch('/api/inpaint', { method: 'POST', body: formData });
+          const res = await fetch(`${backendBaseUrl}/api/inpaint`, { method: 'POST', body: formData });
           const data = await res.json();
           if (!res.ok || !data.success) throw new Error(data.detail || '处理失败');
 
@@ -840,9 +984,8 @@
             repairedImg.src = data.image_base64;
           });
         } else {
-          // Pure frontend online mode (GitHub Pages / standalone HTML)
-          await new Promise(r => setTimeout(r, 30));
-          inpaintClientSide();
+          // Run true AI LaMa ONNX model directly in browser!
+          await inpaintBrowserLaMa();
           maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
           historyStack.push(imageCanvas.toDataURL('image/png'));
         }
@@ -903,7 +1046,7 @@
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         undoImage();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() && e.key.toLowerCase() === 'c' && imageCanvas.width) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && imageCanvas.width) {
         e.preventDefault();
         copyResult();
       }
